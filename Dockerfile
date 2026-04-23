@@ -26,6 +26,7 @@ RUN uv sync --frozen --no-editable
 # Set environment variables for Langflow
 ENV LANGFLOW_HOST=0.0.0.0
 ENV LANGFLOW_PORT=9090
+ENV LANGFLOW_BACKEND_ONLY=true
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Expose port 9090
