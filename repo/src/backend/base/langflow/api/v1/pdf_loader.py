@@ -15,20 +15,20 @@ from typing import Annotated
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from langflow.utils.pdf_extraction import extract_pdf_text
+
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_PDF_MAGIC = b"%PDF"
+
 
 # ---------------------------------------------------------------------------
 # Response schema
 # ---------------------------------------------------------------------------
-
-_ALLOWED_CONTENT_TYPES = {
-    "application/pdf",
-    "application/x-pdf",
-    "binary/octet-stream",
-    "application/octet-stream",
-}
-
-_PDF_MAGIC = b"%PDF"
 
 
 class PDFLoaderResponse(BaseModel):
@@ -50,7 +50,7 @@ async def pdf_loader(
 ) -> PDFLoaderResponse:
     """Extract text from an uploaded PDF file.
 
-    Accepts a multipart/form-data upload with a single ``file`` field.
+    Accepts a ``multipart/form-data`` upload with a single ``file`` field.
 
     Returns:
         JSON with ``text`` (extracted content), ``page_count``, and
@@ -58,42 +58,45 @@ async def pdf_loader(
 
     Raises:
         400: If the file is corrupted or cannot be parsed as a PDF.
-        415: If the uploaded file is not a PDF.
+        415: If the uploaded file is not a PDF (wrong extension and no PDF
+             magic bytes).
     """
     # ---- Read the raw bytes ------------------------------------------------
     try:
         raw = await file.read()
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Could not read uploaded file: {exc}") from exc
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not read uploaded file: {exc}",
+        ) from exc
 
     # ---- Validate file type ------------------------------------------------
     filename = (file.filename or "").lower()
-    content_type = (file.content_type or "").lower().split(";")[0].strip()
-
     is_pdf_by_name = filename.endswith(".pdf")
-    is_pdf_by_content_type = content_type in _ALLOWED_CONTENT_TYPES
     is_pdf_by_magic = raw[:4] == _PDF_MAGIC
 
-    # Reject clearly non-PDF files: wrong extension AND wrong magic bytes
+    # Reject files that are neither named *.pdf nor start with %PDF magic.
     if not is_pdf_by_name and not is_pdf_by_magic:
         raise HTTPException(
             status_code=415,
             detail=(
                 "Unsupported file type. Only PDF files are accepted. "
-                f"Received filename='{file.filename}', content_type='{file.content_type}'."
+                f"Received filename='{file.filename}', "
+                f"content_type='{file.content_type}'."
             ),
         )
 
     # ---- Extract text ------------------------------------------------------
     try:
-        from langflow.components.documentloaders.pdf_loader import _extract_pdf_text
-
-        text, page_count = _extract_pdf_text(io.BytesIO(raw))
+        text, page_count = extract_pdf_text(io.BytesIO(raw))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ImportError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Failed to process PDF: {exc}") from exc
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to process PDF: {exc}",
+        ) from exc
 
     return PDFLoaderResponse(text=text, page_count=page_count, status="success")

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import struct
 import tempfile
 from contextlib import suppress
 from pathlib import Path
@@ -32,7 +31,7 @@ def _build_minimal_pdf(text: str = "Hello PDF World") -> bytes:
     stream_bytes = stream.encode("latin-1")
     stream_len = len(stream_bytes)
 
-    objects = [
+    objects: list[bytes] = [
         b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
         b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
         (
@@ -70,7 +69,33 @@ def _build_minimal_pdf(text: str = "Hello PDF World") -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Unit tests for the extraction utility (no HTTP stack needed)
+# ---------------------------------------------------------------------------
+
+def test_extract_pdf_text_valid():
+    """extract_pdf_text returns (text, page_count) for a valid PDF."""
+    from langflow.utils.pdf_extraction import extract_pdf_text
+
+    pdf_bytes = _build_minimal_pdf("Hello PDF World")
+    text, page_count = extract_pdf_text(io.BytesIO(pdf_bytes))
+
+    assert isinstance(text, str)
+    assert isinstance(page_count, int)
+    assert page_count == 1
+    assert "Hello PDF World" in text
+
+
+def test_extract_pdf_text_corrupted():
+    """extract_pdf_text raises ValueError for a corrupted PDF."""
+    from langflow.utils.pdf_extraction import extract_pdf_text
+
+    corrupted = b"%PDF-1.4\nThis is not a valid PDF - corrupted!!!"
+    with pytest.raises(ValueError, match="(?i)pdf"):
+        extract_pdf_text(io.BytesIO(corrupted))
+
+
+# ---------------------------------------------------------------------------
+# Integration fixtures
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(name="pdf_client")
@@ -106,7 +131,7 @@ async def pdf_client_fixture(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Integration tests
 # ---------------------------------------------------------------------------
 
 PDF_ENDPOINT = "api/v1/flows/pdf-loader"
@@ -181,7 +206,6 @@ async def test_pdf_loader_non_pdf_file(pdf_client):
 
 async def test_pdf_loader_jpeg_file(pdf_client):
     """A JPEG file should return 400 or 415."""
-    # Minimal JPEG magic bytes
     jpeg_bytes = bytes([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46])
 
     response = await pdf_client.post(

@@ -9,13 +9,11 @@ accepts a single ``.pdf`` file upload.
 
 from __future__ import annotations
 
-import io
-from pathlib import Path
-
 from langflow.base.data.base_file import BaseFileComponent
 from langflow.io import Output
 from langflow.schema.data import Data
 from langflow.schema.message import Message
+from langflow.utils.pdf_extraction import extract_pdf_text
 
 
 class PDFLoaderComponent(BaseFileComponent):
@@ -73,7 +71,7 @@ class PDFLoaderComponent(BaseFileComponent):
         """
         for base_file in file_list:
             try:
-                text, page_count = _extract_pdf_text(base_file.path)
+                text, page_count = extract_pdf_text(base_file.path)
                 base_file.data = Data(
                     text=text,
                     data={
@@ -105,60 +103,3 @@ class PDFLoaderComponent(BaseFileComponent):
             Message: A Message object containing the extracted text.
         """
         return self.load_files_message()
-
-
-# ---------------------------------------------------------------------------
-# Pure-function helper (also used by the API endpoint)
-# ---------------------------------------------------------------------------
-
-def _extract_pdf_text(path: Path | str | bytes | io.IOBase) -> tuple[str, int]:
-    """Extract all text from a PDF and return ``(text, page_count)``.
-
-    Args:
-        path: A filesystem path (``Path`` or ``str``), raw PDF bytes, or a
-              file-like object.
-
-    Returns:
-        A ``(text, page_count)`` tuple where *text* is the concatenated text
-        from every page and *page_count* is the total number of pages.
-
-    Raises:
-        ValueError: If the file is not a valid PDF or cannot be parsed.
-        ImportError: If ``pypdf`` is not installed.
-    """
-    try:
-        from pypdf import PdfReader  # type: ignore[import]
-        from pypdf.errors import PdfReadError  # type: ignore[import]
-    except ImportError as exc:
-        msg = (
-            "pypdf is required for PDF text extraction. "
-            "Install it with: pip install pypdf"
-        )
-        raise ImportError(msg) from exc
-
-    # Normalise the input into something PdfReader can consume
-    if isinstance(path, (str, Path)):
-        source: str | io.IOBase = str(path)
-    else:
-        source = path  # bytes or file-like
-
-    try:
-        reader = PdfReader(source)
-    except PdfReadError as exc:
-        msg = f"Failed to read PDF: {exc}"
-        raise ValueError(msg) from exc
-    except Exception as exc:  # noqa: BLE001
-        msg = f"Unexpected error reading PDF: {exc}"
-        raise ValueError(msg) from exc
-
-    page_count = len(reader.pages)
-    parts: list[str] = []
-    for page in reader.pages:
-        try:
-            page_text = page.extract_text() or ""
-        except Exception:  # noqa: BLE001
-            page_text = ""
-        parts.append(page_text)
-
-    text = "\n".join(parts)
-    return text, page_count
