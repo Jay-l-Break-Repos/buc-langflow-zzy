@@ -14,6 +14,14 @@ dotenv.config({ path: path.resolve(__dirname, "../../.env") });
  * See https://playwright.dev/docs/test-configuration.
  */
 
+// The API port for the running Langflow backend.
+// In the evaluation environment the Docker container runs on 9090.
+// In local dev the backend runs on 7860 (proxied via frontend on 3000).
+const API_BASE_URL =
+  process.env.PLAYWRIGHT_BASE_URL ||
+  process.env.API_BASE_URL ||
+  `http://localhost:${PORT || 3000}/`;
+
 export default defineConfig({
   testDir: "./tests",
   /* Run tests in files in parallel */
@@ -43,6 +51,20 @@ export default defineConfig({
 
   /* Configure projects for major browsers */
   projects: [
+    {
+      // ----------------------------------------------------------------
+      // "api" project: runs tests/public/** directly against the backend.
+      // No webServer is needed — the server is assumed to be running.
+      // Used by the evaluation system which starts the Docker container
+      // on port 9090 and runs: npx playwright test --project=api
+      // ----------------------------------------------------------------
+      name: "api",
+      testMatch: "**/public/**/*.spec.ts",
+      use: {
+        ...devices["Desktop Chrome"],
+        baseURL: API_BASE_URL,
+      },
+    },
     {
       name: "chromium",
       use: {

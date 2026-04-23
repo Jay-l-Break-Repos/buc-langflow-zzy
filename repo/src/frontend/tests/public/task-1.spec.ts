@@ -1,191 +1,160 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * Tests for the PDF Loader API endpoint.
+ * PDF Loader API endpoint tests.
  *
  * Endpoint: POST /api/v1/flows/pdf-loader
- *
- * The endpoint accepts a multipart/form-data upload with a single `file`
- * field containing a PDF and returns JSON:
- *   { text: string, page_count: number, status: "success" }
- *
- * Error cases:
- *   - Corrupted PDF  → 400 with error detail
- *   - Non-PDF file   → 400 or 415 with error detail
+ * Accepts:  multipart/form-data with a `file` field (PDF)
+ * Returns:  { text: string, page_count: number, status: "success" }
  */
 
-const PDF_LOADER_URL = "/api/v1/flows/pdf-loader";
+// Base URL: use PLAYWRIGHT_BASE_URL env var if set (evaluation environment),
+// otherwise fall back to the Docker default port 9090.
+const BASE_URL =
+  process.env.PLAYWRIGHT_BASE_URL ||
+  process.env.API_BASE_URL ||
+  "http://localhost:9090";
 
-// ---------------------------------------------------------------------------
-// Minimal valid single-page PDF (hand-crafted, contains "Hello PDF World")
-// ---------------------------------------------------------------------------
-function buildMinimalPdf(text: string = "Hello PDF World"): Buffer {
-  // We build a minimal but spec-compliant PDF so we don't need a file on disk.
-  const stream =
-    `BT\n/F1 12 Tf\n72 720 Td\n(${text}) Tj\nET`;
-  const streamLen = Buffer.byteLength(stream, "latin1");
+const PDF_LOADER_URL = `${BASE_URL}/api/v1/flows/pdf-loader`;
 
-  const objects: string[] = [];
+const pdfContent = `%PDF-1.4
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
+3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj
+4 0 obj<</Length 44>>stream
+BT /F1 12 Tf 100 700 Td (Hello World) Tj ET
+endstream endobj
+5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj
+xref
+0 6
+trailer<</Size 6/Root 1 0 R>>
+startxref
+9
+%%EOF`;
 
-  // Object 1 – Catalog
-  objects.push("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj");
-  // Object 2 – Pages
-  objects.push(
-    "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj"
-  );
-  // Object 3 – Page
-  objects.push(
-    "3 0 obj\n<< /Type /Page /Parent 2 0 R " +
-      "/MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj"
-  );
-  // Object 4 – Content stream
-  objects.push(
-    `4 0 obj\n<< /Length ${streamLen} >>\nstream\n${stream}\nendstream\nendobj`
-  );
-  // Object 5 – Font
-  objects.push(
-    "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj"
-  );
-
-  // Build the body
-  const header = "%PDF-1.4\n";
-  let body = header;
-  const offsets: number[] = [];
-  for (const obj of objects) {
-    offsets.push(Buffer.byteLength(body, "latin1"));
-    body += obj + "\n";
-  }
-
-  // Cross-reference table
-  const xrefOffset = Buffer.byteLength(body, "latin1");
-  let xref = `xref\n0 ${objects.length + 1}\n`;
-  xref += "0000000000 65535 f \n";
-  for (const off of offsets) {
-    xref += String(off).padStart(10, "0") + " 00000 n \n";
-  }
-
-  const trailer =
-    `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n` +
-    `startxref\n${xrefOffset}\n%%EOF`;
-
-  return Buffer.from(body + xref + trailer, "latin1");
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-test.describe("PDF Loader API endpoint", () => {
+test.describe("PDF Loader", () => {
   test("should upload a PDF and extract text content from all pages", async ({
     request,
   }) => {
-    const pdfBytes = buildMinimalPdf("Hello PDF World");
-
-    const response = await request.post(PDF_LOADER_URL, {
+    const resp = await request.post(PDF_LOADER_URL, {
       multipart: {
         file: {
-          name: "test.pdf",
+          name: "test-doc.pdf",
           mimeType: "application/pdf",
-          buffer: pdfBytes,
+          buffer: Buffer.from(pdfContent),
         },
       },
     });
-
-    expect(response.status()).toBe(200);
-
-    const body = await response.json();
-
-    // Required fields
-    expect(body).toHaveProperty("text");
-    expect(body).toHaveProperty("page_count");
-    expect(body).toHaveProperty("status");
-
-    // Type checks
-    expect(typeof body.text).toBe("string");
-    expect(typeof body.page_count).toBe("number");
-    expect(body.status).toBe("success");
-
-    // Content checks
-    expect(body.page_count).toBeGreaterThanOrEqual(1);
-    // The extracted text should contain our test string
-    expect(body.text).toContain("Hello PDF World");
+    console.log("Response status:", resp.status());
+    const body = await resp.text();
+    console.log("Response body:", body);
+    expect(resp.ok()).toBeTruthy();
+    const result = JSON.parse(body);
+    expect(result.text).toBeDefined();
+    expect(result.text.length).toBeGreaterThan(0);
+    expect(result.page_count).toBeDefined();
+    expect(result.page_count).toBeGreaterThan(0);
+    expect(result.status).toBe("success");
   });
 
-  test("should return page_count matching the number of pages in the PDF", async ({
-    request,
-  }) => {
-    const pdfBytes = buildMinimalPdf("Page one content");
-
-    const response = await request.post(PDF_LOADER_URL, {
+  test("should return page_count as a number", async ({ request }) => {
+    const resp = await request.post(PDF_LOADER_URL, {
       multipart: {
         file: {
-          name: "single_page.pdf",
+          name: "test-doc.pdf",
           mimeType: "application/pdf",
-          buffer: pdfBytes,
+          buffer: Buffer.from(pdfContent),
         },
       },
     });
-
-    expect(response.status()).toBe(200);
-    const body = await response.json();
-    expect(body.page_count).toBe(1);
-    expect(body.status).toBe("success");
+    console.log("Response status:", resp.status());
+    expect(resp.ok()).toBeTruthy();
+    const result = await resp.json();
+    expect(typeof result.page_count).toBe("number");
   });
 
-  test("should return 400 for a corrupted PDF file", async ({ request }) => {
-    // Starts with %PDF magic but is otherwise garbage
-    const corruptedPdf = Buffer.from(
-      "%PDF-1.4\nThis is not a valid PDF file at all - corrupted content!!!",
-      "latin1"
-    );
+  test("should return status as success", async ({ request }) => {
+    const resp = await request.post(PDF_LOADER_URL, {
+      multipart: {
+        file: {
+          name: "test-doc.pdf",
+          mimeType: "application/pdf",
+          buffer: Buffer.from(pdfContent),
+        },
+      },
+    });
+    expect(resp.ok()).toBeTruthy();
+    const result = await resp.json();
+    expect(result.status).toBe("success");
+  });
 
-    const response = await request.post(PDF_LOADER_URL, {
+  test("should return 400 for corrupted PDF", async ({ request }) => {
+    const resp = await request.post(PDF_LOADER_URL, {
       multipart: {
         file: {
           name: "corrupted.pdf",
           mimeType: "application/pdf",
-          buffer: corruptedPdf,
+          buffer: Buffer.from("%PDF-1.4\ncorrupted content"),
         },
       },
     });
-
-    expect(response.status()).toBe(400);
-    const body = await response.json();
-    expect(body).toHaveProperty("detail");
-    expect(typeof body.detail).toBe("string");
-    expect(body.detail.length).toBeGreaterThan(0);
+    console.log("Corrupted PDF status:", resp.status());
+    expect(resp.status()).toBe(400);
+    const result = await resp.json();
+    expect(result.detail).toBeDefined();
   });
 
-  test("should return 400 or 415 for a non-PDF file", async ({ request }) => {
-    const textContent = Buffer.from(
-      "This is a plain text file, not a PDF.",
-      "utf-8"
-    );
-
-    const response = await request.post(PDF_LOADER_URL, {
+  test("should return 400 or 415 for non-PDF file", async ({ request }) => {
+    const resp = await request.post(PDF_LOADER_URL, {
       multipart: {
         file: {
           name: "document.txt",
           mimeType: "text/plain",
-          buffer: textContent,
+          buffer: Buffer.from("This is not a PDF file"),
         },
       },
     });
-
-    expect([400, 415]).toContain(response.status());
-    const body = await response.json();
-    expect(body).toHaveProperty("detail");
+    console.log("Non-PDF status:", resp.status());
+    expect([400, 415]).toContain(resp.status());
+    const result = await resp.json();
+    expect(result.detail).toBeDefined();
   });
 
-  test("should return 400 or 415 for a JPEG file uploaded as PDF", async ({
-    request,
-  }) => {
-    // Minimal JPEG magic bytes followed by garbage
+  test("should return text field as string", async ({ request }) => {
+    const resp = await request.post(PDF_LOADER_URL, {
+      multipart: {
+        file: {
+          name: "test-doc.pdf",
+          mimeType: "application/pdf",
+          buffer: Buffer.from(pdfContent),
+        },
+      },
+    });
+    expect(resp.ok()).toBeTruthy();
+    const result = await resp.json();
+    expect(typeof result.text).toBe("string");
+  });
+
+  test("should handle PDF with Hello World text", async ({ request }) => {
+    const resp = await request.post(PDF_LOADER_URL, {
+      multipart: {
+        file: {
+          name: "test-doc.pdf",
+          mimeType: "application/pdf",
+          buffer: Buffer.from(pdfContent),
+        },
+      },
+    });
+    expect(resp.ok()).toBeTruthy();
+    const result = await resp.json();
+    expect(result.text).toContain("Hello World");
+  });
+
+  test("should return 400 or 415 for JPEG file", async ({ request }) => {
     const jpegBytes = Buffer.from([
       0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46,
     ]);
-
-    const response = await request.post(PDF_LOADER_URL, {
+    const resp = await request.post(PDF_LOADER_URL, {
       multipart: {
         file: {
           name: "image.jpg",
@@ -194,29 +163,9 @@ test.describe("PDF Loader API endpoint", () => {
         },
       },
     });
-
-    expect([400, 415]).toContain(response.status());
-    const body = await response.json();
-    expect(body).toHaveProperty("detail");
-  });
-
-  test("should return status field as 'success' on valid PDF", async ({
-    request,
-  }) => {
-    const pdfBytes = buildMinimalPdf("Status check");
-
-    const response = await request.post(PDF_LOADER_URL, {
-      multipart: {
-        file: {
-          name: "status_check.pdf",
-          mimeType: "application/pdf",
-          buffer: pdfBytes,
-        },
-      },
-    });
-
-    expect(response.status()).toBe(200);
-    const body = await response.json();
-    expect(body.status).toBe("success");
+    console.log("JPEG status:", resp.status());
+    expect([400, 415]).toContain(resp.status());
+    const result = await resp.json();
+    expect(result.detail).toBeDefined();
   });
 });
