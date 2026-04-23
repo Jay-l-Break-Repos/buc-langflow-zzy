@@ -56,14 +56,28 @@ def extract_pdf_text(
         # Assume it is already a file-like object.
         reader_input = source  # type: ignore[assignment]
 
-    try:
-        reader = PdfReader(reader_input)
-    except PdfReadError as exc:
-        msg = f"Failed to read PDF: {exc}"
-        raise ValueError(msg) from exc
-    except Exception as exc:  # noqa: BLE001
-        msg = f"Unexpected error reading PDF: {exc}"
-        raise ValueError(msg) from exc
+    # Try strict=False first to handle PDFs with minor structural issues
+    # (e.g. wrong startxref offset, missing xref entries, etc.)
+    reader = None
+    last_exc: Exception | None = None
+
+    for strict in (False, True):
+        try:
+            reader = PdfReader(reader_input, strict=strict)
+            break
+        except PdfReadError as exc:
+            last_exc = exc
+            # Reset the stream position for the next attempt
+            if hasattr(reader_input, "seek"):
+                reader_input.seek(0)  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if hasattr(reader_input, "seek"):
+                reader_input.seek(0)  # type: ignore[union-attr]
+
+    if reader is None:
+        msg = f"Failed to read PDF: {last_exc}"
+        raise ValueError(msg) from last_exc
 
     page_count = len(reader.pages)
     parts: list[str] = []
