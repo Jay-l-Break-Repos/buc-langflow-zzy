@@ -14,7 +14,6 @@ from langflow.api.v1 import (
     mcp_router,
     monitor_router,
     openai_responses_router,
-    pdf_loader_router,
     projects_router,
     starter_projects_router,
     store_router,
@@ -53,8 +52,6 @@ router_v1.include_router(mcp_router)
 router_v1.include_router(voice_mode_router)
 router_v1.include_router(mcp_projects_router)
 router_v1.include_router(openai_responses_router)
-# PDF Loader endpoint: POST /api/v1/flows/pdf-loader
-router_v1.include_router(pdf_loader_router, prefix="/flows", tags=["PDF Loader"])
 
 router_v2.include_router(files_router_v2)
 router_v2.include_router(mcp_router_v2)
