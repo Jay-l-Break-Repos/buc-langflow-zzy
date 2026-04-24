@@ -12,7 +12,52 @@ Requires ``pypdf`` (already a project dependency at ``~5.1.0``).
 from __future__ import annotations
 
 import io
+import re
 from pathlib import Path
+
+
+def _fallback_extract(raw: bytes) -> tuple[str, int]:
+    """Regex-based fallback extraction for malformed PDFs.
+
+    Extracts text from PDF stream content operators and counts pages
+    by looking for /Type /Page entries.
+
+    Args:
+        raw: The raw PDF bytes.
+
+    Returns:
+        A ``(text, page_count)`` tuple.
+    """
+    texts: list[str] = []
+
+    # Find all stream...endstream blocks
+    stream_pattern = re.compile(rb"stream\s*\n(.*?)\nendstream", re.DOTALL)
+    for match in stream_pattern.finditer(raw):
+        stream_data = match.group(1)
+        # Find text show operators: (text) Tj
+        text_pattern = re.compile(rb"\(([^)]*)\)\s*Tj")
+        for text_match in text_pattern.finditer(stream_data):
+            try:
+                texts.append(text_match.group(1).decode("latin-1"))
+            except Exception:  # noqa: BLE001
+                pass
+        # Also handle TJ array operator: [(text)] TJ
+        tj_array_pattern = re.compile(rb"\[(.*?)\]\s*TJ", re.DOTALL)
+        for tj_match in tj_array_pattern.finditer(stream_data):
+            array_content = tj_match.group(1)
+            inner_text_pattern = re.compile(rb"\(([^)]*)\)")
+            for inner_match in inner_text_pattern.finditer(array_content):
+                try:
+                    texts.append(inner_match.group(1).decode("latin-1"))
+                except Exception:  # noqa: BLE001
+                    pass
+
+    # Count pages: /Type /Page but not /Type /Pages
+    page_count = len(re.findall(rb"/Type\s*/Page(?![s])", raw))
+    if page_count == 0:
+        page_count = 1  # At least 1 page if we found any text
+
+    return "\n".join(texts), page_count
 
 
 def extract_pdf_text(
@@ -46,46 +91,83 @@ def extract_pdf_text(
         )
         raise ImportError(msg) from exc
 
+    # Read raw bytes for potential fallback extraction
+    raw_bytes: bytes | None = None
+
     # Normalise *source* into something PdfReader accepts.
-    # PdfReader accepts: str path, Path, or a file-like object.
     if isinstance(source, (str, Path)):
         reader_input: str | io.IOBase = str(source)
+        try:
+            with open(str(source), "rb") as f:
+                raw_bytes = f.read()
+        except Exception:  # noqa: BLE001
+            pass
     elif isinstance(source, (bytes, bytearray)):
+        raw_bytes = bytes(source)
         reader_input = io.BytesIO(source)
+    elif hasattr(source, "read"):
+        # File-like object: read it to get raw bytes, then reset
+        try:
+            raw_bytes = source.read()  # type: ignore[union-attr]
+            source.seek(0)  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            pass
+        reader_input = source  # type: ignore[assignment]
     else:
-        # Assume it is already a file-like object.
         reader_input = source  # type: ignore[assignment]
 
-    # Try strict=False first to handle PDFs with minor structural issues
-    # (e.g. wrong startxref offset, missing xref entries, etc.)
+    # Validate it looks like a PDF
+    if raw_bytes is not None and not raw_bytes.strip().startswith(b"%PDF"):
+        msg = "Not a valid PDF file (missing %PDF header)"
+        raise ValueError(msg)
+
+    # Try pypdf first with strict=False, then strict=True
     reader = None
     last_exc: Exception | None = None
 
     for strict in (False, True):
         try:
-            reader = PdfReader(reader_input, strict=strict)
+            if isinstance(reader_input, str):
+                reader = PdfReader(reader_input, strict=strict)
+            else:
+                if hasattr(reader_input, "seek"):
+                    reader_input.seek(0)  # type: ignore[union-attr]
+                reader = PdfReader(reader_input, strict=strict)
             break
-        except PdfReadError as exc:
-            last_exc = exc
-            # Reset the stream position for the next attempt
-            if hasattr(reader_input, "seek"):
-                reader_input.seek(0)  # type: ignore[union-attr]
-        except Exception as exc:  # noqa: BLE001
+        except (PdfReadError, Exception) as exc:  # noqa: BLE001
             last_exc = exc
             if hasattr(reader_input, "seek"):
                 reader_input.seek(0)  # type: ignore[union-attr]
 
-    if reader is None:
+    if reader is not None:
+        try:
+            page_count = len(reader.pages)
+            parts: list[str] = []
+            for page in reader.pages:
+                try:
+                    page_text = page.extract_text() or ""
+                except Exception:  # noqa: BLE001
+                    page_text = ""
+                parts.append(page_text)
+            text = "\n".join(parts)
+            if text.strip():
+                return text, page_count
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Fallback: regex-based extraction for malformed PDFs
+    if raw_bytes is not None:
+        try:
+            text, page_count = _fallback_extract(raw_bytes)
+            if text.strip():
+                return text, page_count
+        except Exception:  # noqa: BLE001
+            pass
+
+    # If we got here, nothing worked
+    if last_exc is not None:
         msg = f"Failed to read PDF: {last_exc}"
         raise ValueError(msg) from last_exc
 
-    page_count = len(reader.pages)
-    parts: list[str] = []
-    for page in reader.pages:
-        try:
-            page_text = page.extract_text() or ""
-        except Exception:  # noqa: BLE001
-            page_text = ""
-        parts.append(page_text)
-
-    return "\n".join(parts), page_count
+    msg = "Failed to extract text from PDF"
+    raise ValueError(msg)
