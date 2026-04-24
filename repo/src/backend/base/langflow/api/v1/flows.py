@@ -16,6 +16,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from fastapi_pagination import Page, Params
 from fastapi_pagination.ext.sqlmodel import apaginate
+from pydantic import BaseModel
 from sqlmodel import and_, col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -37,9 +38,88 @@ from langflow.services.database.models.folder.constants import DEFAULT_FOLDER_NA
 from langflow.services.database.models.folder.model import Folder
 from langflow.services.deps import get_settings_service
 from langflow.utils.compression import compress_response
+from langflow.utils.pdf_extraction import extract_pdf_text
 
 # build router
 router = APIRouter(prefix="/flows", tags=["Flows"])
+
+# ---------------------------------------------------------------------------
+# PDF Loader response schema
+# ---------------------------------------------------------------------------
+
+_PDF_MAGIC = b"%PDF"
+
+
+class PDFLoaderResponse(BaseModel):
+    """Response model for the PDF Loader endpoint."""
+
+    text: str
+    page_count: int
+    status: str = "success"
+
+
+# ---------------------------------------------------------------------------
+# PDF Loader endpoint  –  POST /api/v1/flows/pdf-loader
+#
+# Defined here (before the /{flow_id} catch-all routes) so FastAPI matches
+# the literal path "pdf-loader" first.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/pdf-loader", response_model=PDFLoaderResponse, status_code=200, tags=["PDF Loader"])
+async def pdf_loader(
+    file: Annotated[UploadFile, File(description="PDF file to extract text from")],
+) -> PDFLoaderResponse:
+    """Extract text from an uploaded PDF file.
+
+    Accepts a ``multipart/form-data`` upload with a single ``file`` field.
+
+    Returns:
+        JSON with ``text`` (extracted content), ``page_count``, and
+        ``status`` (``"success"``).
+
+    Raises:
+        400: If the file is corrupted or cannot be parsed as a PDF.
+        415: If the uploaded file is not a PDF.
+    """
+    # ---- Read raw bytes ----------------------------------------------------
+    try:
+        raw = await file.read()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not read uploaded file: {exc}",
+        ) from exc
+
+    # ---- Validate file type ------------------------------------------------
+    filename = (file.filename or "").lower()
+    is_pdf_by_name = filename.endswith(".pdf")
+    is_pdf_by_magic = raw[:4] == _PDF_MAGIC
+
+    if not is_pdf_by_name and not is_pdf_by_magic:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                "Unsupported file type. Only PDF files are accepted. "
+                f"Received filename='{file.filename}', "
+                f"content_type='{file.content_type}'."
+            ),
+        )
+
+    # ---- Extract text ------------------------------------------------------
+    try:
+        text, page_count = extract_pdf_text(io.BytesIO(raw))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to process PDF: {exc}",
+        ) from exc
+
+    return PDFLoaderResponse(text=text, page_count=page_count, status="success")
 
 
 async def _verify_fs_path(path: str | None) -> None:
