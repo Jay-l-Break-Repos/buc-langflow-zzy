@@ -31,7 +31,7 @@ def _fallback_extract(raw: bytes) -> tuple[str, int]:
     texts: list[str] = []
 
     # Find all stream...endstream blocks
-    stream_pattern = re.compile(rb"stream\s*\n(.*?)\nendstream", re.DOTALL)
+    stream_pattern = re.compile(rb"stream\s*\n(.*?)endstream", re.DOTALL)
     for match in stream_pattern.finditer(raw):
         stream_data = match.group(1)
         # Find text show operators: (text) Tj
