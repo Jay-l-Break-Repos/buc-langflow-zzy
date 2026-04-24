@@ -82,8 +82,6 @@ async def pdf_loader(
         400: If the file is corrupted or cannot be parsed as a PDF.
         415: If the uploaded file is not a PDF.
     """
-    print(f"[PDF LOADER] Received request for file: {file.filename}")  # noqa: T201
-
     # ---- Read raw bytes ----------------------------------------------------
     try:
         raw = await file.read()

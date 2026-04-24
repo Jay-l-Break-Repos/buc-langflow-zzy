@@ -27,10 +27,11 @@ RUN uv sync --frozen --no-editable
 ENV LANGFLOW_HOST=0.0.0.0
 ENV LANGFLOW_PORT=9090
 ENV LANGFLOW_BACKEND_ONLY=true
+ENV LANGFLOW_AUTO_LOGIN=true
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Expose port 9090
 EXPOSE 9090
 
 # Run Langflow
-CMD ["langflow", "run", "--host", "0.0.0.0", "--port", "9090"]
+CMD ["langflow", "run", "--host", "0.0.0.0", "--port", "9090", "--backend-only"]
