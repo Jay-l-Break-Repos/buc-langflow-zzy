@@ -4,6 +4,9 @@ Provides a node that accepts a PDF file upload, extracts text from all pages
 using ``pypdf``, and exposes the content as a ``Message`` output for downstream
 nodes to consume.
 
+After processing, ``self.status`` is set so the node's info panel in the UI
+shows extraction status (success/error), page count, and any error message.
+
 Error handling covers:
 - Corrupted / invalid PDF files (``pypdf.errors.PdfReadError``)
 - Password-protected PDFs (``reader.is_encrypted`` guard)
@@ -28,6 +31,11 @@ class PDFLoaderComponent(BaseFileComponent):
     category and accepts a single ``.pdf`` file upload.  Text is extracted
     page-by-page using ``pypdf.PdfReader`` and returned as a ``Message``
     for downstream nodes.
+
+    After each run the node's info panel (``self.status``) is updated with:
+    - Extraction status (✅ success / ❌ error)
+    - Number of pages processed
+    - Error message when extraction fails
 
     Error conditions (corrupted file, password-protected PDF, empty PDF)
     are captured and surfaced as structured ``Data`` objects so that the
@@ -66,6 +74,41 @@ class PDFLoaderComponent(BaseFileComponent):
     # Internal helpers                                                     #
     # ------------------------------------------------------------------ #
 
+    def _build_status(
+        self,
+        *,
+        success: bool,
+        file_name: str,
+        page_count: int,
+        error: str | None = None,
+    ) -> str:
+        """Build a human-readable status string for the node's info panel.
+
+        The string is set on ``self.status`` so Langflow's UI can display
+        extraction feedback directly on the node after a run.
+
+        Args:
+            success:    ``True`` when extraction completed without errors.
+            file_name:  Base name of the processed PDF file.
+            page_count: Number of pages found in the PDF (0 on error).
+            error:      Error description when ``success`` is ``False``.
+
+        Returns:
+            A formatted status string.
+        """
+        if success:
+            return (
+                f"✅ Extracted successfully\n"
+                f"File: {file_name}\n"
+                f"Pages: {page_count}"
+            )
+        return (
+            f"❌ Extraction failed\n"
+            f"File: {file_name}\n"
+            f"Pages: {page_count}\n"
+            f"Error: {error or 'Unknown error'}"
+        )
+
     def _extract_text_from_pdf(self, file_path: Path) -> Data:
         """Open *file_path* with ``pypdf`` and return a populated ``Data`` object.
 
@@ -95,6 +138,7 @@ class PDFLoaderComponent(BaseFileComponent):
         from pypdf.errors import PdfReadError, PdfStreamError
 
         str_path = str(file_path)
+        file_name = file_path.name
         base_meta: dict = {"file_path": str_path}
 
         try:
@@ -104,6 +148,12 @@ class PDFLoaderComponent(BaseFileComponent):
                 except (PdfReadError, PdfStreamError) as exc:
                     msg = f"Corrupted or invalid PDF file: {exc}"
                     self.log(msg)
+                    self.status = self._build_status(
+                        success=False,
+                        file_name=file_name,
+                        page_count=0,
+                        error=msg,
+                    )
                     return Data(
                         data={
                             **base_meta,
@@ -121,6 +171,12 @@ class PDFLoaderComponent(BaseFileComponent):
                         "Please provide an unencrypted file."
                     )
                     self.log(msg)
+                    self.status = self._build_status(
+                        success=False,
+                        file_name=file_name,
+                        page_count=0,
+                        error=msg,
+                    )
                     return Data(
                         data={
                             **base_meta,
@@ -136,6 +192,12 @@ class PDFLoaderComponent(BaseFileComponent):
                 if page_count == 0:
                     msg = "PDF contains no pages."
                     self.log(msg)
+                    self.status = self._build_status(
+                        success=False,
+                        file_name=file_name,
+                        page_count=0,
+                        error=msg,
+                    )
                     return Data(
                         data={
                             **base_meta,
@@ -155,7 +217,7 @@ class PDFLoaderComponent(BaseFileComponent):
                     except Exception as page_exc:  # noqa: BLE001
                         self.log(
                             f"Could not extract text from page {page_num} "
-                            f"of '{file_path.name}': {page_exc}"
+                            f"of '{file_name}': {page_exc}"
                         )
                         page_texts.append("")
 
@@ -164,10 +226,15 @@ class PDFLoaderComponent(BaseFileComponent):
                 # Warn (but don't fail) when the PDF appears to be image-only
                 if not full_text.strip():
                     self.log(
-                        f"No text extracted from '{file_path.name}'. "
+                        f"No text extracted from '{file_name}'. "
                         "The file may be a scanned/image-only PDF."
                     )
 
+                self.status = self._build_status(
+                    success=True,
+                    file_name=file_name,
+                    page_count=page_count,
+                )
                 return Data(
                     data={
                         **base_meta,
@@ -177,9 +244,15 @@ class PDFLoaderComponent(BaseFileComponent):
                     }
                 )
 
-        except FileNotFoundError as exc:
+        except FileNotFoundError:
             msg = f"File not found: {file_path}"
             self.log(msg)
+            self.status = self._build_status(
+                success=False,
+                file_name=file_name,
+                page_count=0,
+                error=msg,
+            )
             return Data(
                 data={
                     **base_meta,
@@ -190,8 +263,14 @@ class PDFLoaderComponent(BaseFileComponent):
                 }
             )
         except OSError as exc:
-            msg = f"I/O error reading '{file_path.name}': {exc}"
+            msg = f"I/O error reading '{file_name}': {exc}"
             self.log(msg)
+            self.status = self._build_status(
+                success=False,
+                file_name=file_name,
+                page_count=0,
+                error=msg,
+            )
             return Data(
                 data={
                     **base_meta,
@@ -202,8 +281,14 @@ class PDFLoaderComponent(BaseFileComponent):
                 }
             )
         except Exception as exc:  # noqa: BLE001
-            msg = f"Unexpected error processing '{file_path.name}': {exc}"
+            msg = f"Unexpected error processing '{file_name}': {exc}"
             self.log(msg)
+            self.status = self._build_status(
+                success=False,
+                file_name=file_name,
+                page_count=0,
+                error=msg,
+            )
             return Data(
                 data={
                     **base_meta,
@@ -230,6 +315,9 @@ class PDFLoaderComponent(BaseFileComponent):
         ``Data`` object (``status="error"``) rather than raising, so the
         pipeline can continue processing remaining files.
 
+        After all files are processed ``self.status`` reflects the aggregate
+        result (last file's status for single-file use; summary for multi-file).
+
         Args:
             file_list: List of validated ``BaseFile`` objects representing
                        the uploaded PDF file(s).
@@ -240,6 +328,20 @@ class PDFLoaderComponent(BaseFileComponent):
         for base_file in file_list:
             extracted_data = self._extract_text_from_pdf(base_file.path)
             base_file.data = extracted_data
+
+        # For multi-file runs, set an aggregate status summary
+        if len(file_list) > 1:
+            success_count = sum(
+                1
+                for f in file_list
+                if f.data and f.data[0].data.get("status") == "success"
+            )
+            total = len(file_list)
+            self.status = (
+                f"Processed {total} file(s): "
+                f"{success_count} succeeded, {total - success_count} failed."
+            )
+
         return file_list
 
     # ------------------------------------------------------------------ #

@@ -7,18 +7,18 @@ Covers:
 - process_files() handles password-protected PDFs gracefully
 - process_files() handles empty (zero-page) PDFs gracefully
 - process_files() handles image-only (no text) PDFs without raising
+- process_files() sets self.status with success feedback (page count, file name)
+- process_files() sets self.status with error feedback (error message)
+- process_files() sets aggregate status for multi-file runs
+- _build_status() returns correct strings for success and error cases
 - load_pdf_content() returns a Message with the extracted text
 - load_pdf_content() returns a Message on error (no exception raised)
 """
 
 from __future__ import annotations
 
-import io
-import struct
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +50,7 @@ def _make_component():
     comp.delete_server_file_after_processing = False
     comp.ignore_unsupported_extensions = True
     comp.ignore_unspecified_files = False
+    comp.status = None  # will be set by process_files / _extract_text_from_pdf
     # Stub out log() so tests don't need a running server
     comp.log = lambda msg, *a, **kw: None  # noqa: ARG005
     return comp
@@ -58,6 +59,9 @@ def _make_component():
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+import pytest
+
 
 @pytest.fixture()
 def tmp_pdf(tmp_path):
@@ -98,12 +102,64 @@ def corrupted_pdf(tmp_path):
     return bad_path
 
 
-@pytest.fixture()
-def empty_file_pdf(tmp_path):
-    """Return a completely empty file with a .pdf extension."""
-    empty_path = tmp_path / "empty.pdf"
-    empty_path.write_bytes(b"")
-    return empty_path
+# ---------------------------------------------------------------------------
+# Tests: _build_status helper
+# ---------------------------------------------------------------------------
+
+class TestBuildStatus:
+    """_build_status() returns correctly formatted status strings."""
+
+    def test_success_contains_checkmark(self):
+        comp = _make_component()
+        result = comp._build_status(
+            success=True, file_name="test.pdf", page_count=5
+        )
+        assert "✅" in result
+
+    def test_success_contains_file_name(self):
+        comp = _make_component()
+        result = comp._build_status(
+            success=True, file_name="my_document.pdf", page_count=3
+        )
+        assert "my_document.pdf" in result
+
+    def test_success_contains_page_count(self):
+        comp = _make_component()
+        result = comp._build_status(
+            success=True, file_name="test.pdf", page_count=7
+        )
+        assert "7" in result
+
+    def test_error_contains_cross_mark(self):
+        comp = _make_component()
+        result = comp._build_status(
+            success=False, file_name="bad.pdf", page_count=0, error="Corrupted"
+        )
+        assert "❌" in result
+
+    def test_error_contains_error_message(self):
+        comp = _make_component()
+        result = comp._build_status(
+            success=False,
+            file_name="bad.pdf",
+            page_count=0,
+            error="PDF is password-protected.",
+        )
+        assert "PDF is password-protected." in result
+
+    def test_error_contains_file_name(self):
+        comp = _make_component()
+        result = comp._build_status(
+            success=False, file_name="locked.pdf", page_count=0, error="err"
+        )
+        assert "locked.pdf" in result
+
+    def test_error_without_error_message_uses_fallback(self):
+        comp = _make_component()
+        result = comp._build_status(
+            success=False, file_name="x.pdf", page_count=0, error=None
+        )
+        assert "Unknown error" in result
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +194,23 @@ class TestExtractTextSuccess:
         comp = _make_component()
         result = comp._extract_text_from_pdf(tmp_pdf)
         assert "error" not in result.data
+
+    def test_self_status_set_on_success(self, tmp_pdf):
+        comp = _make_component()
+        comp._extract_text_from_pdf(tmp_pdf)
+        assert comp.status is not None
+        assert "✅" in comp.status
+
+    def test_self_status_contains_page_count_on_success(self, tmp_pdf):
+        comp = _make_component()
+        result = comp._extract_text_from_pdf(tmp_pdf)
+        page_count = result.data["page_count"]
+        assert str(page_count) in comp.status
+
+    def test_self_status_contains_file_name_on_success(self, tmp_pdf):
+        comp = _make_component()
+        comp._extract_text_from_pdf(tmp_pdf)
+        assert tmp_pdf.name in comp.status
 
 
 class TestExtractTextPasswordProtected:
@@ -183,6 +256,31 @@ class TestExtractTextPasswordProtected:
 
         assert result.data["text"] == ""
 
+    def test_self_status_set_on_error(self):
+        comp = _make_component()
+        mock_reader = MagicMock()
+        mock_reader.is_encrypted = True
+
+        with patch("pypdf.PdfReader", return_value=mock_reader):
+            comp._extract_text_from_pdf(Path("/fake/protected.pdf"))
+
+        assert comp.status is not None
+        assert "❌" in comp.status
+
+    def test_self_status_contains_error_detail(self):
+        comp = _make_component()
+        mock_reader = MagicMock()
+        mock_reader.is_encrypted = True
+
+        with patch("pypdf.PdfReader", return_value=mock_reader):
+            comp._extract_text_from_pdf(Path("/fake/protected.pdf"))
+
+        # Status should mention password or encryption
+        assert (
+            "password" in comp.status.lower()
+            or "encrypt" in comp.status.lower()
+        )
+
 
 class TestExtractTextCorrupted:
     """_extract_text_from_pdf returns error Data for corrupted PDFs."""
@@ -215,6 +313,16 @@ class TestExtractTextCorrupted:
 
         assert result.data["page_count"] == 0
 
+    def test_self_status_set_on_corrupted(self):
+        comp = _make_component()
+        from pypdf.errors import PdfReadError
+
+        with patch("pypdf.PdfReader", side_effect=PdfReadError("bad pdf")):
+            comp._extract_text_from_pdf(Path("/fake/bad.pdf"))
+
+        assert comp.status is not None
+        assert "❌" in comp.status
+
 
 class TestExtractTextEmptyPDF:
     """_extract_text_from_pdf returns error Data for zero-page PDFs."""
@@ -241,6 +349,18 @@ class TestExtractTextEmptyPDF:
 
         assert "page" in result.data["error"].lower()
 
+    def test_self_status_set_on_empty(self):
+        comp = _make_component()
+        mock_reader = MagicMock()
+        mock_reader.is_encrypted = False
+        mock_reader.pages = []
+
+        with patch("pypdf.PdfReader", return_value=mock_reader):
+            comp._extract_text_from_pdf(Path("/fake/empty.pdf"))
+
+        assert comp.status is not None
+        assert "❌" in comp.status
+
 
 class TestExtractTextFileNotFound:
     """_extract_text_from_pdf returns error Data when the file is missing."""
@@ -256,6 +376,13 @@ class TestExtractTextFileNotFound:
         missing = tmp_path / "does_not_exist.pdf"
         result = comp._extract_text_from_pdf(missing)
         assert "error" in result.data
+
+    def test_self_status_set_on_missing(self, tmp_path):
+        comp = _make_component()
+        missing = tmp_path / "does_not_exist.pdf"
+        comp._extract_text_from_pdf(missing)
+        assert comp.status is not None
+        assert "❌" in comp.status
 
 
 class TestExtractTextImageOnlyPDF:
@@ -276,6 +403,20 @@ class TestExtractTextImageOnlyPDF:
         assert result.data["status"] == "success"
         assert result.data["text"] == ""
         assert result.data["page_count"] == 1
+
+    def test_self_status_set_to_success_for_image_only(self):
+        comp = _make_component()
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = ""
+        mock_reader = MagicMock()
+        mock_reader.is_encrypted = False
+        mock_reader.pages = [mock_page]
+
+        with patch("pypdf.PdfReader", return_value=mock_reader):
+            comp._extract_text_from_pdf(Path("/fake/image_only.pdf"))
+
+        assert comp.status is not None
+        assert "✅" in comp.status
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +461,13 @@ class TestProcessFiles:
         data_obj = result[0].data[0]
         assert data_obj.data["file_path"] == str(tmp_pdf)
 
+    def test_process_files_sets_status_on_component(self, tmp_pdf):
+        comp = _make_component()
+        base_file = _make_base_file(tmp_pdf)
+        comp.process_files([base_file])
+        # self.status should be set after processing
+        assert comp.status is not None
+
     def test_process_files_corrupted_does_not_raise(self, corrupted_pdf):
         comp = _make_component()
         base_file = _make_base_file(corrupted_pdf)
@@ -334,6 +482,15 @@ class TestProcessFiles:
         data_obj = result[0].data[0]
         assert data_obj.data["status"] == "error"
 
+    def test_process_files_corrupted_sets_error_status_on_component(
+        self, corrupted_pdf
+    ):
+        comp = _make_component()
+        base_file = _make_base_file(corrupted_pdf)
+        comp.process_files([base_file])
+        assert comp.status is not None
+        assert "❌" in comp.status
+
     def test_process_files_multiple_files(self, tmp_pdf, tmp_path):
         """process_files handles a list with more than one file."""
         comp = _make_component()
@@ -346,6 +503,20 @@ class TestProcessFiles:
         assert len(result) == 2
         for f in result:
             assert f.data[0].data["status"] == "success"
+
+    def test_process_files_multiple_files_sets_aggregate_status(
+        self, tmp_pdf, tmp_path
+    ):
+        """process_files sets an aggregate status string for multi-file runs."""
+        comp = _make_component()
+        second_pdf = tmp_path / "second.pdf"
+        second_pdf.write_bytes(tmp_pdf.read_bytes())
+
+        files = [_make_base_file(tmp_pdf), _make_base_file(second_pdf)]
+        comp.process_files(files)
+        # Aggregate status should mention file count
+        assert comp.status is not None
+        assert "2" in comp.status
 
 
 # ---------------------------------------------------------------------------
