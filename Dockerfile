@@ -23,15 +23,6 @@ COPY repo/ .
 # Install dependencies using uv
 RUN uv sync --frozen --no-editable
 
-# Create a stub frontend directory in case the package doesn't include one.
-# Without this, the server crashes if --backend-only is not set.
-RUN .venv/bin/python -c "\
-import langflow, pathlib; \
-p = pathlib.Path(langflow.__file__).parent / 'frontend'; \
-p.mkdir(exist_ok=True); \
-(p / 'index.html').write_text('<html><body>Langflow API</body></html>')" \
-    || true
-
 # Set environment variables for Langflow
 ENV LANGFLOW_HOST=0.0.0.0
 ENV LANGFLOW_PORT=9090
@@ -41,5 +32,5 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Expose port 9090
 EXPOSE 9090
 
-# Run Langflow - use --backend-only to skip frontend serving
+# Run Langflow
 CMD ["langflow", "run", "--host", "0.0.0.0", "--port", "9090", "--backend-only"]
